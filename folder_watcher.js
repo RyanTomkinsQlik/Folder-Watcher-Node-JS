@@ -2,9 +2,10 @@ const fs = require('fs');
 const path = require('path');
 
 class FolderWatcher {
-  constructor(watchPath, moveToFolder = null) {
+  constructor(watchPath, moveToFolder = null, enablePrinting = false) {
     this.watchPath = watchPath;
     this.moveToFolder = moveToFolder;
+    this.enablePrinting = enablePrinting;
     this.existingFiles = new Set();
     this.isInitialized = false;
   }
@@ -37,7 +38,7 @@ class FolderWatcher {
     }
   }
 
-  // Read and print file contents, then optionally move file
+  // Read, display, and print file contents, then move file
   async printFileContents(filePath) {
     try {
       // Add a small delay to ensure file is fully written
@@ -54,6 +55,7 @@ class FolderWatcher {
       // Handle different file types
       let content = '';
       let fileSize = 0;
+      let shouldPrint = true;
       
       if (fileExtension === '.docx' || fileExtension === '.doc') {
         content = await this.readWordFile(filePath);
@@ -61,6 +63,8 @@ class FolderWatcher {
       } else if (fileExtension === '.pdf') {
         content = await this.readPdfFile(filePath);
         fileSize = content.length;
+        // For PDFs, we'll print the original file, not the extracted text
+        shouldPrint = 'original';
       } else {
         // Handle as text file
         try {
@@ -71,6 +75,7 @@ class FolderWatcher {
           const stats = fs.statSync(filePath);
           fileSize = stats.size;
           content = `[Binary file - ${fileSize} bytes]\nUse a specialized application to view this file type.`;
+          shouldPrint = false; // Don't print binary files
         }
       }
       
@@ -80,7 +85,12 @@ class FolderWatcher {
       console.log('='.repeat(50));
       console.log(''); // Empty line for spacing
       
-      // Move file after printing (if moveToFolder is set)
+      // Send to printer if enabled (BEFORE moving the file)
+      if (this.enablePrinting && shouldPrint) {
+        await this.sendToPrinter(filePath, fileName, content, shouldPrint);
+      }
+      
+      // Move file AFTER printing (if moveToFolder is set)
       await this.moveFileAfterProcessing(filePath, fileName);
       
     } catch (error) {
@@ -118,7 +128,89 @@ class FolderWatcher {
     }
   }
 
-  // Move processed file to another location
+  // Send file to printer
+  async sendToPrinter(filePath, fileName, content, printType) {
+    try {
+      console.log(`🖨️  Sending to printer: ${fileName}`);
+      
+      const { exec } = require('child_process');
+      const util = require('util');
+      const execAsync = util.promisify(exec);
+      
+      if (printType === 'original') {
+        // Print original file (for PDFs, Word docs, etc.)
+        // Use different approaches for Windows
+        let printCommand;
+        
+        if (process.platform === 'win32') {
+          // Method 1: Try using Windows print verb
+          printCommand = `powershell -Command "Start-Process -FilePath '${filePath}' -Verb Print -WindowStyle Hidden -Wait"`;
+        } else if (process.platform === 'darwin') {
+          printCommand = `lpr "${filePath}"`;
+        } else {
+          printCommand = `lp "${filePath}"`;
+        }
+        
+        console.log(`🔄 Executing print command for: ${fileName}`);
+        await execAsync(printCommand);
+        
+        // Add a delay to ensure printing starts before moving
+        console.log(`⏳ Waiting for print job to start...`);
+        await new Promise(resolve => setTimeout(resolve, 3000));
+        
+        console.log(`✅ Print command completed: ${fileName}`);
+        
+      } else {
+        // Create temporary text file and print it
+        const tempDir = require('os').tmpdir();
+        const tempFilePath = path.join(tempDir, `temp_print_${Date.now()}.txt`);
+        
+        // Create printable content with header
+        const printContent = `
+FILE: ${fileName}
+PATH: ${filePath}
+PROCESSED: ${new Date().toLocaleString()}
+${'='.repeat(60)}
+
+${content}
+        `.trim();
+        
+        // Write to temp file
+        fs.writeFileSync(tempFilePath, printContent, 'utf8');
+        
+        // Print temp file
+        const printCommand = process.platform === 'win32' 
+          ? `notepad /p "${tempFilePath}"`
+          : process.platform === 'darwin' 
+            ? `lpr "${tempFilePath}"`
+            : `lp "${tempFilePath}"`;
+        
+        console.log(`🔄 Printing text content for: ${fileName}`);
+        await execAsync(printCommand);
+        
+        // Add delay for text printing too
+        await new Promise(resolve => setTimeout(resolve, 2000));
+        
+        console.log(`✅ Printed content to printer: ${fileName}`);
+        
+        // Clean up temp file after a delay
+        setTimeout(() => {
+          try {
+            fs.unlinkSync(tempFilePath);
+          } catch (error) {
+            // Ignore cleanup errors
+          }
+        }, 5000);
+      }
+      
+    } catch (error) {
+      console.error(`❌ Failed to print ${fileName}:`, error.message);
+      console.log(`💡 Make sure you have a default printer set up`);
+      
+      // If printing fails, we still want to continue with moving the file
+      console.log(`⚠️  Continuing with file processing despite print error...`);
+    }
+  }
   async moveFileAfterProcessing(filePath, fileName) {
     if (!this.moveToFolder) return; // Skip if no move folder specified
     
@@ -205,16 +297,27 @@ async function main() {
   // Get move destination folder from command line (optional)
     const moveToFolder = process.argv[3] || 'C:\\Users\\SDP\\Documents\\ProcessedFiles';
   
+  // Check if printing is enabled (optional 4th parameter)
+    const enablePrinting = process.argv[4] === 'print' || process.argv[4] === 'true' || true; // Always print by default
+  
   console.log('🔍 File Watcher Starting...');
+  if (enablePrinting) {
+    console.log('🖨️  Printer mode: ENABLED');
+  }
   console.log('Press Ctrl+C to stop\n');
 
-  const watcher = new FolderWatcher(watchPath, moveToFolder);
+  const watcher = new FolderWatcher(watchPath, moveToFolder, enablePrinting);
   await watcher.initialize();
   
   if (moveToFolder) {
-    console.log(`📦 Files will be moved to: ${moveToFolder} after processing\n`);
+    console.log(`📦 Files will be moved to: ${moveToFolder} after processing`);
   }
   
+  if (enablePrinting) {
+    console.log(`🖨️  Files will be automatically printed`);
+  }
+  
+  console.log(''); // Empty line
   watcher.startWatching();
 }
 
